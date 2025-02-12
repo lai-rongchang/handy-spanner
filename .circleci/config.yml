@@ -3,9 +3,9 @@ version: 2
 jobs:
   test:
     docker:
-      - image: golang:1.20-buster
+      - image: golang:1.22-bookworm
     environment:
-      GO111MODULE: 'on'
+      GO111MODULE: "on"
     working_directory: /go/src/handy-spanner
     steps:
       - checkout

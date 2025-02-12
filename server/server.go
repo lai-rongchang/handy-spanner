@@ -1235,3 +1235,7 @@ func (s *server) DeleteBackupSchedule(ctx context.Context, req *adminv1pb.Delete
 func (s *server) ListBackupSchedules(ctx context.Context, req *adminv1pb.ListBackupSchedulesRequest) (*adminv1pb.ListBackupSchedulesResponse, error) {
 	return nil, status.Errorf(codes.Unimplemented, "not implemented yet: ListBackupSchedules")
 }
+
+func (s *server) AddSplitPoints(ctx context.Context, req *adminv1pb.AddSplitPointsRequest) (*adminv1pb.AddSplitPointsResponse, error) {
+	return nil, status.Errorf(codes.Unimplemented, "not implemented yet: AddSplitPoints")
+}
