@@ -7,7 +7,7 @@ require (
 	cloud.google.com/go/iam v1.3.1
 	cloud.google.com/go/longrunning v0.6.4
 	cloud.google.com/go/spanner v1.75.0
-	github.com/cloudspannerecosystem/memefish v0.4.0
+	github.com/cloudspannerecosystem/memefish v0.0.0-20231128072053-0a1141e8eb65
 	github.com/dgryski/go-farm v0.0.0-20240924180020-3414d57e47da
 	github.com/google/go-cmp v0.6.0
 	github.com/google/uuid v1.6.0
