@@ -1,6 +1,6 @@
 module github.com/gcpug/handy-spanner
 
-go 1.22.7
+go 1.23.0
 
 toolchain go1.23.4
 
@@ -9,9 +9,9 @@ require (
 	cloud.google.com/go/iam v1.3.1
 	cloud.google.com/go/longrunning v0.6.4
 	cloud.google.com/go/spanner v1.75.0
-	github.com/cloudspannerecosystem/memefish v0.0.0-20231128072053-0a1141e8eb65
+	github.com/cloudspannerecosystem/memefish v0.6.1
 	github.com/dgryski/go-farm v0.0.0-20200201041132-a6ae2369ad13
-	github.com/google/go-cmp v0.6.0
+	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/mattn/go-sqlite3 v1.14.14
 	golang.org/x/sync v0.11.0

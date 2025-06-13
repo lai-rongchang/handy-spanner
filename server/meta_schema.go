@@ -40,7 +40,7 @@ var metaTablesReverseMap = map[string][]string{
 
 var metaTables = []*ast.CreateTable{
 	{
-		Name: &ast.Ident{Name: "__INFORMATION_SCHEMA__SCHEMATA"},
+		Name: &ast.Path{Idents: []*ast.Ident{{Name: "__INFORMATION_SCHEMA__SCHEMATA"}}},
 		Columns: []*ast.ColumnDef{
 			{
 				Name:    &ast.Ident{Name: "CATALOG_NAME"},
@@ -70,7 +70,7 @@ var metaTables = []*ast.CreateTable{
 		},
 	},
 	{
-		Name: &ast.Ident{Name: "__INFORMATION_SCHEMA__TABLES"},
+		Name: &ast.Path{Idents: []*ast.Ident{{Name: "__INFORMATION_SCHEMA__TABLES"}}},
 		Columns: []*ast.ColumnDef{
 			{
 				Name:    &ast.Ident{Name: "TABLE_CATALOG"},
@@ -119,7 +119,7 @@ var metaTables = []*ast.CreateTable{
 		},
 	},
 	{
-		Name: &ast.Ident{Name: "__INFORMATION_SCHEMA__COLUMNS"},
+		Name: &ast.Path{Idents: []*ast.Ident{{Name: "__INFORMATION_SCHEMA__COLUMNS"}}},
 		Columns: []*ast.ColumnDef{
 			{
 				Name:    &ast.Ident{Name: "TABLE_CATALOG"},
@@ -187,7 +187,7 @@ var metaTables = []*ast.CreateTable{
 		},
 	},
 	{
-		Name: &ast.Ident{Name: "__INFORMATION_SCHEMA__INDEXES"},
+		Name: &ast.Path{Idents: []*ast.Ident{{Name: "__INFORMATION_SCHEMA__INDEXES"}}},
 		Columns: []*ast.ColumnDef{
 			{
 				Name:    &ast.Ident{Name: "TABLE_CATALOG"},
@@ -265,7 +265,7 @@ var metaTables = []*ast.CreateTable{
 		},
 	},
 	{
-		Name: &ast.Ident{Name: "__INFORMATION_SCHEMA__INDEX_COLUMNS"},
+		Name: &ast.Path{Idents: []*ast.Ident{{Name: "__INFORMATION_SCHEMA__INDEX_COLUMNS"}}},
 		Columns: []*ast.ColumnDef{
 			{
 				Name:    &ast.Ident{Name: "TABLE_CATALOG"},
@@ -347,7 +347,7 @@ var metaTables = []*ast.CreateTable{
 	},
 
 	{
-		Name: &ast.Ident{Name: "__INFORMATION_SCHEMA__COLUMN_OPTIONS"},
+		Name: &ast.Path{Idents: []*ast.Ident{{Name: "__INFORMATION_SCHEMA__COLUMN_OPTIONS"}}},
 		Columns: []*ast.ColumnDef{
 			{
 				Name:    &ast.Ident{Name: "TABLE_CATALOG"},
@@ -410,7 +410,7 @@ var metaTables = []*ast.CreateTable{
 	},
 
 	{
-		Name: &ast.Ident{Name: "__INFORMATION_SCHEMA__REFERENTIAL_CONSTRAINTS"},
+		Name: &ast.Path{Idents: []*ast.Ident{{Name: "__INFORMATION_SCHEMA__REFERENTIAL_CONSTRAINTS"}}},
 		Columns: []*ast.ColumnDef{
 			{
 				Name:    &ast.Ident{Name: "CONSTRAINT_CATALOG"},

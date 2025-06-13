@@ -83,6 +83,10 @@ func BuildDML(db *database, tx *transaction, dml ast.DML, params map[string]Valu
 
 func (b *QueryBuilder) Build() (string, []interface{}, []ResultItem, error) {
 	switch q := b.stmt.(type) {
+	case *ast.Query:
+		// ast.Query is a wrapper that contains OrderBy/Limit/WITH/PipeOperators
+		// Delegate to the inner query and handle the additional clauses
+		return b.buildQueryWithClauses(q)
 	case *ast.Select:
 		return b.buildSelectQuery(q)
 	case *ast.SubQuery:
@@ -91,7 +95,65 @@ func (b *QueryBuilder) Build() (string, []interface{}, []ResultItem, error) {
 		return b.buildCompoundQuery(q)
 	}
 
-	return "", nil, nil, status.Errorf(codes.Unimplemented, "not unknown expression %T", b.stmt)
+	return "", nil, nil, status.Errorf(codes.Unimplemented, "unsupported query expression %T", b.stmt)
+}
+
+func (b *QueryBuilder) buildQueryWithClauses(query *ast.Query) (string, []interface{}, []ResultItem, error) {
+	// First, build the inner query
+	var baseQuery string
+	var baseData []interface{}
+	var resultItems []ResultItem
+	var err error
+
+	switch innerQuery := query.Query.(type) {
+	case *ast.Select:
+		baseQuery, baseData, resultItems, err = b.buildSelectQuery(innerQuery)
+	case *ast.SubQuery:
+		baseQuery, baseData, resultItems, err = b.buildSubQuery(innerQuery)
+	case *ast.CompoundQuery:
+		baseQuery, baseData, resultItems, err = b.buildCompoundQuery(innerQuery)
+	case *ast.Query:
+		// Nested ast.Query (recursive case)
+		baseQuery, baseData, resultItems, err = b.buildQueryWithClauses(innerQuery)
+	default:
+		return "", nil, nil, status.Errorf(codes.Unimplemented, "unsupported inner query type %T in ast.Query", innerQuery)
+	}
+
+	if err != nil {
+		return "", nil, nil, err
+	}
+
+	// Add the collected data
+	b.args = append(b.args, baseData...)
+
+	// Build additional clauses from ast.Query
+	var orderByClause string
+	if query.OrderBy != nil {
+		view := createTableViewFromItems(resultItems, nil)
+		s, data, err := b.buildQueryOrderByClause(query.OrderBy, view)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		orderByClause = fmt.Sprintf(" ORDER BY %s", s)
+		b.args = append(b.args, data...)
+	}
+
+	var limitClause string
+	if query.Limit != nil {
+		s, data, err := b.buildQueryLimitOffset(query.Limit)
+		if err != nil {
+			return "", nil, nil, err
+		}
+		limitClause = fmt.Sprintf(" LIMIT %s", s)
+		b.args = append(b.args, data...)
+	}
+
+	// TODO: Handle WITH clause and PipeOperators if needed
+	// if query.With != nil { ... }
+	// if len(query.PipeOperators) > 0 { ... }
+
+	finalQuery := fmt.Sprintf("%s%s%s", baseQuery, orderByClause, limitClause)
+	return finalQuery, b.args, resultItems, nil
 }
 
 func (b *QueryBuilder) BuildDML() (string, []interface{}, error) {
@@ -144,14 +206,14 @@ func (b *QueryBuilder) buildSelectQuery(selectStmt *ast.Select) (string, []inter
 		return "", nil, nil, err
 	}
 
-	if selectStmt.Distinct {
+	if selectStmt.AllOrDistinct == ast.AllOrDistinctDistinct {
 		selectQuery = "DISTINCT " + selectQuery
 	}
 
 	query := fmt.Sprintf(`SELECT %s %s %s`, selectQuery, fromClause, whereClause)
 
 	var originalNames []string
-	if b.forceColumnAlias || selectStmt.AsStruct {
+	if b.forceColumnAlias || (selectStmt.As != nil && isAsStruct(selectStmt.As)) {
 		newResultItems := make([]ResultItem, len(resultItems))
 		names := make([]string, len(resultItems))
 		originalNames = make([]string, len(resultItems))
@@ -172,7 +234,7 @@ func (b *QueryBuilder) buildSelectQuery(selectStmt *ast.Select) (string, []inter
 		resultItems = newResultItems
 	}
 
-	if selectStmt.AsStruct {
+	if selectStmt.As != nil && isAsStruct(selectStmt.As) {
 		useSqliteJSON()
 		values := make([]string, len(resultItems))
 		quotedNames := make([]string, len(resultItems))
@@ -222,28 +284,11 @@ func (b *QueryBuilder) buildSubQuery(sub *ast.SubQuery) (string, []interface{}, 
 		return "", nil, nil, err
 	}
 
-	var orderByClause string
-	if sub.OrderBy != nil {
-		view := createTableViewFromItems(items, nil)
-		s, data, err := b.buildQueryOrderByClause(sub.OrderBy, view)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		orderByClause = fmt.Sprintf(" ORDER BY %s", s)
-		b.args = append(b.args, data...)
-	}
+	// Note: OrderBy/Limit are not part of ast.SubQuery
+	// They are only available in ast.Query wrapper. If this SubQuery
+	// has OrderBy/Limit, it would be wrapped in ast.Query and handled there.
 
-	var limitClause string
-	if sub.Limit != nil {
-		s, data, err := b.buildQueryLimitOffset(sub.Limit)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		limitClause = fmt.Sprintf(" LIMIT %s", s)
-		b.args = append(b.args, data...)
-	}
-
-	return fmt.Sprintf("(%s%s%s)", s, limitClause, orderByClause), data, items, nil
+	return fmt.Sprintf("(%s)", s), data, items, nil
 }
 
 func (b *QueryBuilder) buildCompoundQuery(compound *ast.CompoundQuery) (string, []interface{}, []ResultItem, error) {
@@ -253,7 +298,7 @@ func (b *QueryBuilder) buildCompoundQuery(compound *ast.CompoundQuery) (string, 
 	var fullOpName string
 	switch compound.Op {
 	case ast.SetOpUnion:
-		if compound.Distinct {
+		if compound.AllOrDistinct == ast.AllOrDistinctDistinct {
 			// distinct is used by default in sqlite
 			op = "UNION"
 			fullOpName = "UNION DISTINCT"
@@ -262,7 +307,7 @@ func (b *QueryBuilder) buildCompoundQuery(compound *ast.CompoundQuery) (string, 
 			fullOpName = "UNION ALL"
 		}
 	case ast.SetOpIntersect:
-		if compound.Distinct {
+		if compound.AllOrDistinct == ast.AllOrDistinctDistinct {
 			// distinct is used by default in sqlite
 			op = "INTERSECT"
 			fullOpName = "INTERSECT DISTINCT"
@@ -272,7 +317,7 @@ func (b *QueryBuilder) buildCompoundQuery(compound *ast.CompoundQuery) (string, 
 			return "", nil, nil, status.Errorf(codes.Unimplemented, "INTERSECT ALL is not supported yet")
 		}
 	case ast.SetOpExcept:
-		if compound.Distinct {
+		if compound.AllOrDistinct == ast.AllOrDistinctDistinct {
 			// distinct is used by default in sqlite
 			op = "EXCEPT"
 			fullOpName = "EXCEPT DISTINCT"
@@ -327,34 +372,16 @@ func (b *QueryBuilder) buildCompoundQuery(compound *ast.CompoundQuery) (string, 
 		data = append(data, d...)
 	}
 
-	var orderByClause string
-	if compound.OrderBy != nil {
-		view := createTableViewFromItems(items, nil)
-		s, data, err := b.buildQueryOrderByClause(compound.OrderBy, view)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		orderByClause = fmt.Sprintf(" ORDER BY %s", s)
-		b.args = append(b.args, data...)
-	}
-
-	var limitClause string
-	if compound.Limit != nil {
-		s, data, err := b.buildQueryLimitOffset(compound.Limit)
-		if err != nil {
-			return "", nil, nil, err
-		}
-		limitClause = fmt.Sprintf(" LIMIT %s", s)
-		b.args = append(b.args, data...)
-	}
+	// Note: OrderBy/Limit are not part of ast.CompoundQuery
+	// They are only available in ast.Query wrapper. If this CompoundQuery
+	// has OrderBy/Limit, it would be wrapped in ast.Query and handled there.
 
 	query := strings.Join(ss, fmt.Sprintf(" %s ", op))
-	query = fmt.Sprintf("%s%s%s", query, orderByClause, limitClause)
 	return query, data, items, nil
 }
 
 func (b *QueryBuilder) buildUpdate(up *ast.Update) (string, []interface{}, error) {
-	t, err := b.db.useTableExclusive(up.TableName.Name, b.tx)
+	t, err := b.db.useTableExclusive(up.TableName.Idents[0].Name, b.tx)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return "", nil, status.Error(codes.InvalidArgument, err.Error())
@@ -392,7 +419,7 @@ func (b *QueryBuilder) buildUpdate(up *ast.Update) (string, []interface{}, error
 		if len(item.Path) == 1 {
 			ex, err := b.buildExpr(item.Path[0])
 			if err != nil {
-				return "", nil, wrapExprError(err, item.Expr, "Updates")
+				return "", nil, wrapExprError(err, item.DefaultExpr.Expr, "Updates")
 			}
 			path = ex
 			fullPathName = item.Path[0].Name
@@ -400,7 +427,7 @@ func (b *QueryBuilder) buildUpdate(up *ast.Update) (string, []interface{}, error
 		} else {
 			ex, err := b.buildExpr(&ast.Path{Idents: item.Path})
 			if err != nil {
-				return "", nil, wrapExprError(err, item.Expr, "Updates")
+				return "", nil, wrapExprError(err, item.DefaultExpr.Expr, "Updates")
 			}
 			path = ex
 
@@ -425,9 +452,9 @@ func (b *QueryBuilder) buildUpdate(up *ast.Update) (string, []interface{}, error
 		}
 		usedPaths[normalizedFullPathName] = struct{}{}
 
-		value, err := b.buildExpr(item.Expr)
+		value, err := b.buildExpr(item.DefaultExpr.Expr)
 		if err != nil {
-			return "", nil, wrapExprError(err, item.Expr, "Updates")
+			return "", nil, wrapExprError(err, item.DefaultExpr.Expr, "Updates")
 		}
 		b.args = append(b.args, value.Args...)
 
@@ -447,7 +474,7 @@ func (b *QueryBuilder) buildUpdate(up *ast.Update) (string, []interface{}, error
 }
 
 func (b *QueryBuilder) buildInsert(up *ast.Insert) (string, []interface{}, error) {
-	t, err := b.db.useTableExclusive(up.TableName.Name, b.tx)
+	t, err := b.db.useTableExclusive(up.TableName.Idents[0].Name, b.tx)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return "", nil, status.Error(codes.InvalidArgument, err.Error())
@@ -542,7 +569,7 @@ func (b *QueryBuilder) buildInsert(up *ast.Insert) (string, []interface{}, error
 }
 
 func (b *QueryBuilder) buildDelete(up *ast.Delete) (string, []interface{}, error) {
-	t, err := b.db.useTableExclusive(up.TableName.Name, b.tx)
+	t, err := b.db.useTableExclusive(up.TableName.Idents[0].Name, b.tx)
 	if err != nil {
 		if status.Code(err) == codes.NotFound {
 			return "", nil, status.Error(codes.InvalidArgument, err.Error())
@@ -606,6 +633,54 @@ func (b *QueryBuilder) buildQueryTable(exp ast.TableExpr) (*TableView, string, [
 		}
 
 		return view, query, nil, nil
+
+	case *ast.PathTableExpr:
+		// PathTableExpr is used for tables that might be in a schema or implicit UNNEST
+		if len(src.Path.Idents) == 0 {
+			return nil, "", nil, status.Error(codes.InvalidArgument, "Empty path in table expression")
+		}
+
+		// Build the full path string to check for INFORMATION_SCHEMA tables
+		pathNames := make([]string, len(src.Path.Idents))
+		for i, ident := range src.Path.Idents {
+			pathNames[i] = ident.Name
+		}
+		fullPath := strings.Join(pathNames, ".")
+
+		// Check if this is a meta table (like INFORMATION_SCHEMA.SCHEMATA)
+		var tableName string
+		if specialTableName, ok := metaTablesMap[fullPath]; ok {
+			tableName = specialTableName
+		} else {
+			// Fall back to using the last identifier as table name
+			tableName = src.Path.Idents[len(src.Path.Idents)-1].Name
+		}
+
+		t, err := b.db.useTable(tableName, b.tx)
+		if err != nil {
+			if status.Code(err) == codes.NotFound {
+				return nil, "", nil, status.Error(codes.InvalidArgument, err.Error())
+			}
+			return nil, "", nil, err
+		}
+
+		query := QuoteString(t.Name)
+		alias := t.Name
+		if src.As != nil {
+			alias = src.As.Alias.Name
+			query = fmt.Sprintf("%s AS %s", QuoteString(t.Name), QuoteString(alias))
+		} else if schema, ok := metaTablesReverseMap[t.Name]; ok {
+			alias = schema[1]
+			query = fmt.Sprintf("%s AS %s", QuoteString(t.Name), QuoteString(alias))
+		}
+
+		view := t.TableViewWithAlias(alias)
+
+		if err := b.registerTableAlias(view, alias); err != nil {
+			return nil, "", nil, err
+		}
+
+		return view, query, nil, nil
 	case *ast.Join:
 		return b.buildJoinedView(src)
 
@@ -613,7 +688,7 @@ func (b *QueryBuilder) buildQueryTable(exp ast.TableExpr) (*TableView, string, [
 		// TODO: fix this hack
 		// memefish handles  _SCHEMA_._TABLE_ table name as unnest.
 		// So if the unnest path is the same to _SCHEMA_._TABLE_ it is handled as table name.
-		if path, ok := src.Expr.(*ast.Path); src.Implicit && ok {
+		if path, ok := src.Expr.(*ast.Path); ok {
 			names := make([]string, len(path.Idents))
 			for i := range path.Idents {
 				names[i] = path.Idents[i].Name
@@ -1075,26 +1150,6 @@ func (b *QueryBuilder) buildQuery(stmt *ast.Select) (string, error) {
 		b.args = append(b.args, ex.Args...)
 	}
 
-	var orderByClause string
-	if stmt.OrderBy != nil {
-		s, data, err := b.buildQueryOrderByClause(stmt.OrderBy, b.rootView)
-		if err != nil {
-			return "", err
-		}
-		orderByClause = s
-		b.args = append(b.args, data...)
-	}
-
-	var limitClause string
-	if stmt.Limit != nil {
-		s, data, err := b.buildQueryLimitOffset(stmt.Limit)
-		if err != nil {
-			return "", err
-		}
-		limitClause = s
-		b.args = append(b.args, data...)
-	}
-
 	var query string
 	if whereClause != "" {
 		query += fmt.Sprintf(" WHERE %s", whereClause)
@@ -1105,12 +1160,7 @@ func (b *QueryBuilder) buildQuery(stmt *ast.Select) (string, error) {
 	if havingClause != "" {
 		query += fmt.Sprintf(" HAVING %s", havingClause)
 	}
-	if len(orderByClause) != 0 {
-		query += fmt.Sprintf(" ORDER BY %s", orderByClause)
-	}
-	if limitClause != "" {
-		query += fmt.Sprintf(" LIMIT %s", limitClause)
-	}
+	// Note: OrderBy and Limit are now handled at the Query level
 
 	return query, nil
 }
@@ -1644,7 +1694,16 @@ func (b *QueryBuilder) buildExpr(expr ast.Expr) (Expr, error) {
 			return NullExpr, wrapExprError(err, expr, "Expr")
 		}
 
-		ex2, err := b.buildExpr(e.Index)
+		var indexExpr ast.Expr
+		switch typ := e.Index.(type) {
+		case *ast.ExprArg:
+			indexExpr = typ.Expr
+		case *ast.SubscriptSpecifierKeyword:
+			indexExpr = typ.Expr
+		default:
+			return NullExpr, newExprErrorf(expr, true, "Unknown index expression: %T", typ)
+		}
+		ex2, err := b.buildExpr(indexExpr)
 		if err != nil {
 			return NullExpr, wrapExprError(err, expr, "Index")
 		}
@@ -1663,7 +1722,7 @@ func (b *QueryBuilder) buildExpr(expr ast.Expr) (Expr, error) {
 		args = append(args, ex2.Args...)
 
 		var raw string
-		if e.Ordinal {
+		if k, ok := e.Index.(*ast.SubscriptSpecifierKeyword); ok && k.Keyword == ast.PositionKeywordOrdinal {
 			raw = fmt.Sprintf("JSON_EXTRACT(%s, '$[' || (%s-1) || ']')", ex1.Raw, ex2.Raw)
 		} else {
 			raw = fmt.Sprintf("JSON_EXTRACT(%s, '$[' || %s || ']')", ex1.Raw, ex2.Raw)
@@ -1714,7 +1773,7 @@ func (b *QueryBuilder) buildExpr(expr ast.Expr) (Expr, error) {
 		}, nil
 
 	case *ast.CallExpr:
-		name := strings.ToUpper(e.Func.Name)
+		name := strings.ToUpper(e.Func.Idents[0].Name)
 		if v, ok := customFunctionNamesMap[name]; ok {
 			name = v
 		}
@@ -1739,9 +1798,6 @@ func (b *QueryBuilder) buildExpr(expr ast.Expr) (Expr, error) {
 			switch arg := arg.(type) {
 			case *ast.ExprArg:
 				expr = arg.Expr
-			case *ast.IntervalArg:
-				msg := `Unsupported query shape: IntervalArg in function call is not supported yet.`
-				return NullExpr, newExprUnimplementedErrorf(expr, msg)
 			case *ast.SequenceArg:
 				msg := `Unsupported query shape: SequenceArg in function call is not supported yet.`
 				return NullExpr, newExprUnimplementedErrorf(expr, msg)
@@ -1963,13 +2019,27 @@ func (b *QueryBuilder) buildExpr(expr ast.Expr) (Expr, error) {
 		for i := range e.Values {
 			// If the element is struct, need to populate the struct type.
 			// Because only top node knows the details of the type if it's a compound type.
-			if str, ok := e.Values[i].(*ast.StructLiteral); ok && nestedStrType != nil {
+			if str, ok := e.Values[i].(*ast.TypedStructLiteral); ok && nestedStrType != nil {
 				str.Fields = nestedStrType.Fields
 			}
 
 			ex, err := b.buildExpr(e.Values[i])
 			if err != nil {
 				return NullExpr, wrapExprError(err, expr, "ArrayLiteral")
+			}
+
+			// If the element is tuple struct literal, need to populate the filed name.
+			if _, ok := e.Values[i].(*ast.TupleStructLiteral); ok && nestedStrType != nil {
+				if len(ex.ValueType.StructType.FieldNames) != len(nestedStrType.Fields) {
+					return NullExpr, newExprErrorf(expr, true, "STRUCT type has %d fields but nested STRUCT type has %d fields",
+						len(ex.ValueType.StructType.FieldNames), len(nestedStrType.Fields))
+				}
+				for key, field := range nestedStrType.Fields {
+					if field.Ident == nil {
+						continue
+					}
+					ex.ValueType.StructType.FieldNames[key] = field.Ident.Name
+				}
 			}
 
 			args = append(args, ex.Args...)
@@ -1998,34 +2068,66 @@ func (b *QueryBuilder) buildExpr(expr ast.Expr) (Expr, error) {
 			Args: args,
 		}, nil
 
-	case *ast.StructLiteral:
+	case *ast.TupleStructLiteral:
+		useSqliteJSON()
+		// TupleStructLiteral is for unnamed struct syntax like (1, 2)
+		var names []string
+		var vt ValueType
+
+		// For tuple syntax, all fields are unnamed (empty string)
+		for i := 0; i < len(e.Values); i++ {
+			names = append(names, `""`)
+		}
+
+		// Initialize struct type
+		vt = ValueType{
+			Code:       TCStruct,
+			StructType: &StructType{},
+		}
+
+		namesObj := fmt.Sprintf("JSON_ARRAY(%s)", strings.Join(names, ", "))
+
+		var args []interface{}
+		var values []string
+		for _, v := range e.Values {
+			ex, err := b.buildExpr(v)
+			if err != nil {
+				return NullExpr, wrapExprError(err, expr, "Values")
+			}
+			args = append(args, ex.Args...)
+
+			if ex.ValueType.Code == TCStruct {
+				msg := `Unsupported query shape: A struct value cannot be returned as a column value. Rewrite the query to flatten the struct fields in the result.`
+				return NullExpr, newExprUnimplementedErrorf(expr, msg)
+			}
+
+			// For tuple syntax, field names are empty and types are inferred from values
+			vt.StructType.FieldNames = append(vt.StructType.FieldNames, "")
+			vt.StructType.FieldTypes = append(vt.StructType.FieldTypes, &ex.ValueType)
+			values = append(values, ex.Raw)
+		}
+		valuesObj := fmt.Sprintf("JSON_ARRAY(%s)", strings.Join(values, ", "))
+		raw := fmt.Sprintf(`JSON_OBJECT("keys", %s, "values", %s)`, namesObj, valuesObj)
+
+		return Expr{
+			Raw:       raw,
+			ValueType: vt,
+			Args:      args,
+		}, nil
+
+	case *ast.TypedStructLiteral:
 		useSqliteJSON()
 		var names []string
 		var vt ValueType
-		var typedef bool
 
-		if e.Fields == nil {
-			for i := 0; i < len(e.Values); i++ {
-				names = append(names, `""`)
-			}
-
-			// just initialize here. The values will be populated later.
-			vt = ValueType{
-				Code:       TCStruct,
-				StructType: &StructType{},
-			}
-		} else {
-			if len(e.Fields) != len(e.Values) {
-				return NullExpr, newExprErrorf(expr, true, "STRUCT type has %d fields but constructor call has %d fields", len(e.Fields), len(e.Values))
-			}
-
-			typedef = true
-			vt = astTypeToValueType(&ast.StructType{
-				Fields: e.Fields,
-			})
-			for _, name := range vt.StructType.FieldNames {
-				names = append(names, `"`+name+`"`)
-			}
+		if len(e.Fields) != len(e.Values) {
+			return NullExpr, newExprErrorf(expr, true, "STRUCT type has %d fields but constructor call has %d fields", len(e.Fields), len(e.Values))
+		}
+		vt = astTypeToValueType(&ast.StructType{
+			Fields: e.Fields,
+		})
+		for _, name := range vt.StructType.FieldNames {
+			names = append(names, `"`+name+`"`)
 		}
 
 		namesObj := fmt.Sprintf("JSON_ARRAY(%s)", strings.Join(names, ", "))
@@ -2044,16 +2146,9 @@ func (b *QueryBuilder) buildExpr(expr ast.Expr) (Expr, error) {
 				return NullExpr, newExprUnimplementedErrorf(expr, msg)
 			}
 
-			// If types of fields are defined, check type compatibility with the value
-			// otherwise use the type of the value as is
-			if typedef {
-				if !compareValueType(ex.ValueType, *vt.StructType.FieldTypes[i]) {
-					msg := "Struct field %d has type literal %s which does not coerce to %s"
-					return NullExpr, newExprErrorf(expr, true, msg, i+1, ex.ValueType, *vt.StructType.FieldTypes[i])
-				}
-			} else {
-				vt.StructType.FieldNames = append(vt.StructType.FieldNames, "")
-				vt.StructType.FieldTypes = append(vt.StructType.FieldTypes, &ex.ValueType)
+			if !compareValueType(ex.ValueType, *vt.StructType.FieldTypes[i]) {
+				msg := "Struct field %d has type literal %s which does not coerce to %s"
+				return NullExpr, newExprErrorf(expr, true, msg, i+1, ex.ValueType, *vt.StructType.FieldTypes[i])
 			}
 			values = append(values, ex.Raw)
 		}
@@ -2543,4 +2638,10 @@ func isCastableTo(a, b ValueType) bool {
 	}
 
 	return false
+}
+
+// isAsStruct checks if the SelectAs is specifically an AsStruct node
+func isAsStruct(as ast.SelectAs) bool {
+	_, ok := as.(*ast.AsStruct)
+	return ok
 }

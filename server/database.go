@@ -295,7 +295,7 @@ func newDatabase() *database {
 func (d *database) prepareMetaTables(ctx context.Context) error {
 	for _, table := range metaTables {
 		if err := d.CreateTable(ctx, table); err != nil {
-			return fmt.Errorf("failed to create table for %s: %v", table.Name.Name, err)
+			return fmt.Errorf("failed to create table for %s: %v", table.Name.Idents[0].Name, err)
 		}
 	}
 
@@ -313,7 +313,7 @@ func (d *database) prepareMetaTables(ctx context.Context) error {
 
 	for _, table := range metaTables {
 		if err := d.registerInformationSchemaTables(ctx, table); err != nil {
-			return fmt.Errorf("failed to create table for %s: %v", table.Name.Name, err)
+			return fmt.Errorf("failed to create table for %s: %v", table.Name.Idents[0].Name, err)
 		}
 	}
 
@@ -1140,8 +1140,8 @@ func joinIdentNames(idents []*ast.Ident) string {
 }
 
 func (db *database) CreateTable(ctx context.Context, stmt *ast.CreateTable) error {
-	if _, ok := db.tables[stmt.Name.Name]; ok {
-		return fmt.Errorf("duplicated table: %v", stmt.Name.Name)
+	if _, ok := db.tables[stmt.Name.Idents[0].Name]; ok {
+		return fmt.Errorf("duplicated table: %v", stmt.Name.Idents[0].Name)
 	}
 
 	t, err := createTableFromAST(stmt)
@@ -1152,9 +1152,9 @@ func (db *database) CreateTable(ctx context.Context, stmt *ast.CreateTable) erro
 	db.transactionsMu.Lock()
 	defer db.transactionsMu.Unlock()
 
-	db.tables[stmt.Name.Name] = t
+	db.tables[stmt.Name.Idents[0].Name] = t
 	db.tablesInUseMu.Lock()
-	db.tablesInUse[stmt.Name.Name] = newTableTransaction()
+	db.tablesInUse[stmt.Name.Idents[0].Name] = newTableTransaction()
 	db.tablesInUseMu.Unlock()
 
 	var columnDefs []string
@@ -1167,28 +1167,32 @@ func (db *database) CreateTable(ctx context.Context, stmt *ast.CreateTable) erro
 				s += " NOT NULL"
 			}
 		}
-		if col.ast != nil && col.ast.GeneratedExpr != nil {
-			s += fmt.Sprintf(" %s", col.ast.GeneratedExpr.SQL())
+		if col.ast != nil && col.ast.DefaultSemantics != nil {
+			if genCol, ok := col.ast.DefaultSemantics.(*ast.GeneratedColumnExpr); ok {
+				s += fmt.Sprintf(" %s", genCol.SQL())
+			}
 		}
-		if col.ast != nil && col.ast.DefaultExpr != nil {
-			if _, ok := col.ast.DefaultExpr.Expr.(*ast.ArrayLiteral); ok {
-				// TODO: support array literal for default expression
-				s += ` DEFAULT "[]"`
-			} else {
-				defSQL := col.ast.DefaultExpr.Expr.SQL()
+		if col.ast != nil && col.ast.DefaultSemantics != nil {
+			if defExpr, ok := col.ast.DefaultSemantics.(*ast.ColumnDefaultExpr); ok {
+				if _, ok := defExpr.Expr.(*ast.ArrayLiteral); ok {
+					// TODO: support array literal for default expression
+					s += ` DEFAULT "[]"`
+				} else {
+					defSQL := defExpr.Expr.SQL()
 
-				// workaround: convert default expression for sqlite
-				switch exp := col.ast.DefaultExpr.Expr.(type) {
-				case *ast.CallExpr:
-					switch strings.ToUpper(exp.Func.Name) {
-					case "CURRENT_TIMESTAMP":
-						defSQL = "CURRENT_TIMESTAMP"
-					case "CURRENT_DATE":
-						defSQL = "CURRENT_DATE"
+					// workaround: convert default expression for sqlite
+					switch exp := defExpr.Expr.(type) {
+					case *ast.CallExpr:
+						switch strings.ToUpper(exp.Func.Idents[0].Name) {
+						case "CURRENT_TIMESTAMP":
+							defSQL = "CURRENT_TIMESTAMP"
+						case "CURRENT_DATE":
+							defSQL = "CURRENT_DATE"
+						}
 					}
-				}
 
-				s += fmt.Sprintf(" DEFAULT %s", defSQL)
+					s += fmt.Sprintf(" DEFAULT %s", defSQL)
+				}
 			}
 		}
 		if col.valueType.Code == TCString && col.isSized && !col.isMax {
@@ -1201,10 +1205,10 @@ func (db *database) CreateTable(ctx context.Context, stmt *ast.CreateTable) erro
 
 	constraints := ""
 	if stmt.Cluster != nil {
-		parentTableName := stmt.Cluster.TableName.Name
+		parentTableName := stmt.Cluster.TableName.Idents[0].Name
 		parentStmt, ok := db.tables[parentTableName]
 		if !ok {
-			return fmt.Errorf("could not find parent table for interleaving: %v", stmt.Name.Name)
+			return fmt.Errorf("could not find parent table for interleaving: %v", stmt.Name.Idents[0].Name)
 		}
 
 		columns := strings.Join(QuoteStringSlice(parentStmt.primaryKey.IndexColumnNames()), ",")
@@ -1219,7 +1223,7 @@ func (db *database) CreateTable(ctx context.Context, stmt *ast.CreateTable) erro
 			refColumns := joinIdentNames(cnst.ReferenceColumns)
 			constraints += fmt.Sprintf(
 				",\n FOREIGN KEY(%s) REFERENCES %s(%s) %s",
-				columns, QuoteString(cnst.ReferenceTable.Name), refColumns, cnst.OnDelete,
+				columns, QuoteString(cnst.ReferenceTable.Idents[0].Name), refColumns, cnst.OnDelete,
 			)
 		case *ast.Check:
 			// TODO: implement, currently just it is ignored.
@@ -1244,13 +1248,13 @@ func (db *database) CreateTable(ctx context.Context, stmt *ast.CreateTable) erro
 }
 
 func (db *database) registerInformationSchemaTables(ctx context.Context, stmt *ast.CreateTable) error {
-	table, ok := db.tables[stmt.Name.Name]
+	table, ok := db.tables[stmt.Name.Idents[0].Name]
 	if !ok {
-		return fmt.Errorf("unexpected error: table not found: %v", stmt.Name.Name)
+		return fmt.Errorf("unexpected error: table not found: %v", stmt.Name.Idents[0].Name)
 	}
 
 	schemaName := ""
-	tableName := stmt.Name.Name
+	tableName := stmt.Name.Idents[0].Name
 	if schema, ok := metaTablesReverseMap[tableName]; ok {
 		schemaName = schema[0]
 		tableName = schema[1]
@@ -1264,7 +1268,7 @@ func (db *database) registerInformationSchemaTables(ctx context.Context, stmt *a
 	}
 
 	if stmt.Cluster != nil {
-		parentTableName = fmt.Sprintf("%q", stmt.Cluster.TableName.Name)
+		parentTableName = fmt.Sprintf("%q", stmt.Cluster.TableName.Idents[0].Name)
 
 		switch stmt.Cluster.OnDelete {
 		case ast.OnDeleteCascade:
@@ -1288,11 +1292,11 @@ func (db *database) registerInformationSchemaTables(ctx context.Context, stmt *a
 			if tcnst.Name != nil {
 				constraintName = tcnst.Name.Name
 			} else {
-				constraintName = fmt.Sprintf("FK_%s_%s_%d", tableName, cnst.ReferenceTable.Name, i)
+				constraintName = fmt.Sprintf("FK_%s_%s_%d", tableName, cnst.ReferenceTable.Idents[0].Name, i)
 			}
 			query := fmt.Sprintf(
 				`INSERT INTO __INFORMATION_SCHEMA__REFERENTIAL_CONSTRAINTS VALUES("", "", %q, "", "", %q, "SIMPLE", "NO ACTION", %s, "COMMITTED")`,
-				constraintName, cnst.ReferenceTable.Name, onDeleteAction,
+				constraintName, cnst.ReferenceTable.Idents[0].Name, onDeleteAction,
 			)
 			if _, err := db.db.ExecContext(ctx, query); err != nil {
 				return fmt.Errorf("failed to insert into INFORMATION_SCHEMA.REFERENTIAL_CONSTRAINTS for table %s: %v", tableName, err)
@@ -1327,7 +1331,11 @@ func (db *database) registerInformationSchemaTables(ctx context.Context, stmt *a
 
 		// register meta schema for column options
 		if column.Options != nil {
-			if column.Options.AllowCommitTimestamp {
+			var hasAllowCommitTimestamp bool
+			if val, err := column.Options.BoolField("allow_commit_timestamp"); err == nil && val != nil {
+				hasAllowCommitTimestamp = *val
+			}
+			if hasAllowCommitTimestamp {
 
 				// register INFORMATION_SCHEMA.COLUMN_OPTIONS for `allow_commit_timestamp` option
 				query := fmt.Sprintf(`INSERT INTO __INFORMATION_SCHEMA__COLUMN_OPTIONS VALUES("", %q, %q, %q, %q, %q, %q)`,
@@ -1344,8 +1352,8 @@ func (db *database) registerInformationSchemaTables(ctx context.Context, stmt *a
 	if err := db.registerInformationSchemaIndexes(ctx, table, &ast.CreateIndex{
 		Unique:       true,
 		NullFiltered: false,
-		Name:         &ast.Ident{Name: "PRIMARY_KEY"},
-		TableName:    &ast.Ident{Name: stmt.Name.Name},
+		Name:         &ast.Path{Idents: []*ast.Ident{{Name: "PRIMARY_KEY"}}},
+		TableName:    &ast.Path{Idents: []*ast.Ident{{Name: stmt.Name.Idents[0].Name}}},
 		Keys:         stmt.PrimaryKeys,
 		Storing:      nil,
 		InterleaveIn: nil,
@@ -1357,9 +1365,9 @@ func (db *database) registerInformationSchemaTables(ctx context.Context, stmt *a
 }
 
 func (db *database) CreateIndex(ctx context.Context, stmt *ast.CreateIndex) error {
-	table, ok := db.tables[stmt.TableName.Name]
+	table, ok := db.tables[stmt.TableName.Idents[0].Name]
 	if !ok {
-		return fmt.Errorf("table does not exist: %v", stmt.Name.Name)
+		return fmt.Errorf("table does not exist: %v", stmt.Name.Idents[0].Name)
 	}
 
 	index, err := table.createIndex(stmt)
@@ -1387,13 +1395,13 @@ func (db *database) CreateIndex(ctx context.Context, stmt *ast.CreateIndex) erro
 
 func (db *database) registerInformationSchemaIndexes(ctx context.Context, table *Table, stmt *ast.CreateIndex) error {
 	schemaName := ""
-	tableName := stmt.TableName.Name
+	tableName := stmt.TableName.Idents[0].Name
 	if schema, ok := metaTablesReverseMap[tableName]; ok {
 		schemaName = schema[0]
 		tableName = schema[1]
 	}
 
-	indexName := stmt.Name.Name
+	indexName := stmt.Name.Idents[0].Name
 	isUnique := "FALSE"
 	if stmt.Unique {
 		isUnique = "TRUE"
@@ -1403,7 +1411,7 @@ func (db *database) registerInformationSchemaIndexes(ctx context.Context, table 
 		isNullFiltered = "TRUE"
 	}
 
-	indexType := stmt.Name.Name
+	indexType := stmt.Name.Idents[0].Name
 	indexState := "NULL"
 	if indexName != "PRIMARY_KEY" {
 		indexType = "INDEX"
