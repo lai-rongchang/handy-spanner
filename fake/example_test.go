@@ -26,7 +26,7 @@ import (
 	"google.golang.org/api/option"
 )
 
-func ExampleSpannerClient() {
+func Example_spannerClient() {
 	ctx := context.Background()
 	dbName := "projects/fake/instances/fake/databases/fake"
 
@@ -55,7 +55,7 @@ func ExampleSpannerClient() {
 	// output:
 }
 
-func ExampleAdminClient() {
+func Example_adminClient() {
 	ctx := context.Background()
 	dbName := "projects/fake/instances/fake/databases/fake"
 	stmts := []string{
@@ -88,7 +88,7 @@ func ExampleAdminClient() {
 	// output:
 }
 
-func ExampleApplyDDL() {
+func Example_applyDDL() {
 	ctx := context.Background()
 	dbName := "projects/fake/instances/fake/databases/fake"
 	schema := `

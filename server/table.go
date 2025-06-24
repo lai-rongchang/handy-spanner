@@ -73,8 +73,10 @@ func (t *Table) NonNullableAndNonGeneratedColumnsExist(columns []string) (bool, 
 		if c.nullable {
 			continue
 		}
-		if c.ast != nil && c.ast.GeneratedExpr != nil {
-			continue
+		if c.ast != nil && c.ast.DefaultSemantics != nil {
+			if _, ok := c.ast.DefaultSemantics.(*ast.GeneratedColumnExpr); ok {
+				continue
+			}
 		}
 
 		n := c.Name()
@@ -92,7 +94,7 @@ func (t *Table) NonNullableAndNonGeneratedColumnsExist(columns []string) (bool, 
 
 func createTableFromAST(stmt *ast.CreateTable) (*Table, error) {
 	t := newTable()
-	t.Name = stmt.Name.Name
+	t.Name = stmt.Name.Idents[0].Name
 	t.ast = stmt
 
 	for _, col := range stmt.Columns {
@@ -274,7 +276,9 @@ func newColumn(def *ast.ColumnDef) *Column {
 
 	var allowCommitTimestamp bool
 	if def.Options != nil {
-		allowCommitTimestamp = def.Options.AllowCommitTimestamp
+		if val, err := def.Options.BoolField("allow_commit_timestamp"); err == nil && val != nil {
+			allowCommitTimestamp = *val
+		}
 	}
 
 	return &Column{
@@ -449,7 +453,7 @@ func createTableIndex(table *Table, keys []*ast.IndexKey, secondaryIdx *ast.Crea
 	storedColumns := make(map[string]struct{})
 
 	if secondaryIdx != nil {
-		name = secondaryIdx.Name.Name
+		name = secondaryIdx.Name.Idents[0].Name
 		unique = secondaryIdx.Unique
 		nullFiltered = secondaryIdx.NullFiltered
 
